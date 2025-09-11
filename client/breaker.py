@@ -2,10 +2,12 @@ from enum import Enum
 import time
 from threading import Lock
 
+
 class CircuitState(Enum):
     CLOSED = "closed"
     OPEN = "open"
     HALF_OPEN = "half_open"
+
 
 class CircuitBreaker:
     def __init__(self, failure_threshold: int = 5, timeout: int = 60):
@@ -19,7 +21,10 @@ class CircuitBreaker:
     def call(self, func, *args, **kwargs):
         with self._lock:
             if self.state == CircuitState.OPEN:
-                if self.last_failure_time is not None and time.time() - self.last_failure_time < self.timeout:
+                if (
+                    self.last_failure_time is not None
+                    and time.time() - self.last_failure_time < self.timeout
+                ):
                     raise Exception("Circuit breaker is OPEN")
                 else:
                     self.state = CircuitState.HALF_OPEN
