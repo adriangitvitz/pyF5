@@ -11,3 +11,14 @@ wheels/
 *.json
 *.csv
 main.py
+
+# Credenciales F5
+.env*
+
+# Local testing and internal notes
+testclient.py
+test_requests/
+reportes/
+tasks/
+certs/
+summary/
