@@ -1,5 +1,7 @@
 # PyF5
 
+English | [Español](README.es.md)
+
 A read-only Python SDK for F5 BIG-IP that turns the iControl REST API into typed objects and ready-made analyses. Network and operations teams can use it to answer questions like these without clicking through the GUI or reading raw syslog: which certificates expire soon and which services do they break, what went down overnight and why, and are clients rejecting a new certificate?
 
 ## Demo
