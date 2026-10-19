@@ -1,4 +1,5 @@
-from typing import List, Optional
+# ruff: noqa: FA100
+from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -21,7 +22,7 @@ class ProfileReference(BaseModel):
 class ProfileReferences(BaseModel):
     link: Optional[str] = None
     is_subcollection: bool = Field(alias="isSubcollection")
-    items: Optional[List[ProfileReference]] = None
+    items: Optional[list[ProfileReference]] = None
 
 
 class VirtualServer(BaseModel):
@@ -44,4 +45,4 @@ class VirtualServer(BaseModel):
 
 class VirtualServers(BaseModel):
     model_config = ConfigDict(strict=True)
-    items: List[VirtualServer]
+    items: list[VirtualServer]

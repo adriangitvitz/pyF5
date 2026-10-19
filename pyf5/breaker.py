@@ -1,6 +1,10 @@
-from enum import Enum
 import time
+from enum import Enum
 from threading import Lock
+
+
+class CircuitOpenError(Exception):
+    pass
 
 
 class CircuitState(Enum):
@@ -25,7 +29,7 @@ class CircuitBreaker:
                     self.last_failure_time is not None
                     and time.time() - self.last_failure_time < self.timeout
                 ):
-                    raise Exception("Circuit breaker is OPEN")
+                    raise CircuitOpenError("Circuit breaker is OPEN")
                 else:
                     self.state = CircuitState.HALF_OPEN
 
@@ -33,9 +37,9 @@ class CircuitBreaker:
                 result = func(*args, **kwargs)
                 self._reset()
                 return result
-            except Exception as e:
+            except Exception:
                 self._record_failure()
-                raise e
+                raise
 
     def _record_failure(self):
         self.failure_count += 1

@@ -49,7 +49,9 @@ def aggregate(entries: list[LogEntry]) -> list[dict[str, Any]]:
         g["last"] = max(g["last"], e.timestamp)
         g["objects"].update(OBJECT.findall(message))
 
-    result = [{**g, "objects": sorted(g["objects"])} for g in groups.values()]
+    result: list[dict[str, Any]] = [
+        {**g, "objects": sorted(g["objects"])} for g in groups.values()
+    ]
     result.sort(key=lambda g: (SEVERITIES.index(g["severity"]), -g["count"]))
     return result
 

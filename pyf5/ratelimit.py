@@ -14,7 +14,7 @@ class TokenBucket:
     def __init__(self, rate: float, capacity: int):
         self.rate = rate
         self.capacity = capacity
-        self.tokens = capacity
+        self.tokens: float = capacity
         self.last_refill = time.time()
         self.lock = Lock()
 

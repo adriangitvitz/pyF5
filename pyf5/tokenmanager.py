@@ -1,7 +1,14 @@
+from __future__ import annotations
+
 import logging
 import time
 from threading import Lock
-from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+class AuthenticationError(Exception):
+    pass
 
 
 class TokenManager:
@@ -9,7 +16,7 @@ class TokenManager:
         self.f5_client = f5_client
         self.username = username
         self.password = password
-        self.token: Optional[str] = None
+        self.token: str | None = None
         self.token_expiration = None
         self.refresh_threshold = 300  # 5 minutes in seconds
         self._lock = Lock()
@@ -19,7 +26,7 @@ class TokenManager:
             if self._needs_refresh():
                 self._refresh_token()
             if self.token is None:
-                raise Exception("Failed to obtain a valid token")
+                raise AuthenticationError("Failed to obtain a valid token")
             return self.token
 
     def _needs_refresh(self) -> bool:
@@ -45,8 +52,10 @@ class TokenManager:
                     "timeout", 1200
                 )
             else:
-                logging.error(f"Failed to refresh token: {response.status_code}")
-                raise Exception(f"Failed to refresh token: {response.status_code}")
+                logger.error(f"Failed to refresh token: {response.status_code}")
+                raise AuthenticationError(
+                    f"Failed to refresh token: {response.status_code}"
+                )
         except Exception as e:
-            logging.error(f"Failed to refresh token: {e}")
+            logger.error(f"Failed to refresh token: {e}")
             raise

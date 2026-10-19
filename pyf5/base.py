@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any
 
 import httpx
+from typing_extensions import Self
 
 from .breaker import CircuitBreaker
+from .credentials import keychain_credentials
 from .ratelimit import RateLimitConfig, TokenBucket
 from .schemas.devices import Devices
 from .schemas.logs import LogsResponse
@@ -19,6 +22,8 @@ from .schemas.virtual_servers import VirtualServer, VirtualServers
 from .schemas.virtual_stats import VirtualServerStatsResponse
 from .tokenmanager import TokenManager
 
+logger = logging.getLogger(__name__)
+
 MONITOR_TYPES = ("http", "https", "tcp")
 
 
@@ -28,7 +33,7 @@ class F5Client:
         host: str,
         username: str,
         password: str,
-        rate_limit_config: Optional[RateLimitConfig] = None,
+        rate_limit_config: RateLimitConfig | None = None,
         timeout: int = 30,
         max_retries: int = 3,
     ):
@@ -57,6 +62,22 @@ class F5Client:
             ),
         )
 
+    @classmethod
+    def from_keychain(cls, environment: str, **kwargs: Any) -> F5Client:
+        """Build a client from the macOS Keychain item pyf5.<environment>"""
+        host, username, password = keychain_credentials(environment)
+        return cls(host=host, username=username, password=password, **kwargs)
+
+    @classmethod
+    def from_env(cls, **kwargs: Any) -> F5Client:
+        """Build a client from F5_HOST, F5_USERNAME and F5_PASSWORD"""
+        return cls(
+            host=os.environ["F5_HOST"],
+            username=os.environ["F5_USERNAME"],
+            password=os.environ["F5_PASSWORD"],
+            **kwargs,
+        )
+
     def close(self) -> None:
         token = self.token_manager.token
         if token:
@@ -66,11 +87,11 @@ class F5Client:
                     headers={"X-F5-Auth-Token": token},
                 )
             except httpx.HTTPError as e:
-                logging.warning(f"Could not revoke token: {e}")
+                logger.warning(f"Could not revoke token: {e}")
             self.token_manager.token = None
         self.client.close()
 
-    def __enter__(self) -> F5Client:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc) -> None:
@@ -94,7 +115,7 @@ class F5Client:
             url = f"{self.base_url}{endpoint}"
             response = self.client.request(method, url, **kwargs)
             if response.status_code == 401:
-                logging.warning("token expired, forcing refresh")
+                logger.warning("token expired, forcing refresh")
                 self.token_manager.token = None
                 token = self.token_manager.get_valid_token()
                 headers["X-F5-Auth-Token"] = token
@@ -106,12 +127,12 @@ class F5Client:
 
     def _backoff(self, attempt: int, reason: object) -> None:
         wait_time = self.backoff_factor * (2**attempt)
-        logging.warning(
+        logger.warning(
             f"Request failed (attempt {attempt + 1}): {reason} retrying in {wait_time}s"
         )
         time.sleep(wait_time)
 
-    def make_request(self, method: str, endpoint: str, **kwargs):
+    def make_request(self, method: str, endpoint: str, **kwargs) -> httpx.Response:
         for attempt in range(self.max_retries + 1):
             try:
                 response = self._make_authenticated_request(method, endpoint, **kwargs)
@@ -125,6 +146,7 @@ class F5Client:
             if response.status_code < 500 or attempt == self.max_retries:
                 response.raise_for_status()
             self._backoff(attempt, f"HTTP {response.status_code}")
+        raise RuntimeError("retry loop ended without a response")
 
     def get_virtual_server_stats(self, name: str, partition: str = "Common"):
         response = self.make_request(
@@ -149,7 +171,9 @@ class F5Client:
 
     def get_pools(self) -> Pools:
         """Retrieve all load balancing pools with their members"""
-        response = self.make_request("GET", "/mgmt/tm/ltm/pool?expandSubcollections=true")
+        response = self.make_request(
+            "GET", "/mgmt/tm/ltm/pool?expandSubcollections=true"
+        )
         return Pools.model_validate(response.json())
 
     def get_nodes(self) -> Nodes:
@@ -163,7 +187,9 @@ class F5Client:
 
     def get_all_monitors(self) -> dict[str, Monitor]:
         """Index http/https/tcp monitors by full path"""
-        return {m.full_path: m for t in MONITOR_TYPES for m in self.get_monitors(t).items}
+        return {
+            m.full_path: m for t in MONITOR_TYPES for m in self.get_monitors(t).items
+        }
 
     def get_rules(self) -> Rules:
         """Retrieve all iRules with their definitions"""

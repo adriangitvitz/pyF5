@@ -1,4 +1,6 @@
+# ruff: noqa: FA100
 from typing import Optional
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 

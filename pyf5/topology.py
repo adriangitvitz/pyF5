@@ -20,7 +20,9 @@ def virtual_servers_by_pool(
     for rule in rules.items:
         tokens = set(TOKEN.findall(rule.definition))
         rule_pools[rule.full_path] = {
-            p.full_path for p in pools.items if p.full_path in tokens or p.name in tokens
+            p.full_path
+            for p in pools.items
+            if p.full_path in tokens or p.name in tokens
         }
 
     result: dict[str, list[str]] = defaultdict(list)

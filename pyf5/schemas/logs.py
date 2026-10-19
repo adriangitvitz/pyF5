@@ -1,6 +1,8 @@
+# ruff: noqa: FA100
 import re
 from datetime import datetime
 from typing import Optional
+
 from pydantic import BaseModel, Field
 
 SEVERITIES = ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug")

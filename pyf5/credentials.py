@@ -16,6 +16,7 @@ def keychain_credentials(environment: str) -> tuple[str, str, str]:
         result = subprocess.run(
             ["security", "find-generic-password", "-s", service, *args],
             capture_output=True,
+            check=False,
             text=True,
         )
         if result.returncode != 0:

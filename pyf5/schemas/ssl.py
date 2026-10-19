@@ -1,5 +1,6 @@
+# ruff: noqa: FA100
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -24,7 +25,7 @@ class Certificate(BaseModel):
 
 
 class Certificates(BaseModel):
-    items: List[Certificate] = Field(default_factory=list)
+    items: list[Certificate] = Field(default_factory=list)
 
 
 class CertKeyChain(BaseModel):
@@ -39,11 +40,11 @@ class SslProfile(BaseModel):
     cert: Optional[str] = None
     chain: Optional[str] = None
     ca_file: Optional[str] = Field(None, alias="caFile")
-    cert_key_chain: List[CertKeyChain] = Field(
+    cert_key_chain: list[CertKeyChain] = Field(
         default_factory=list, alias="certKeyChain"
     )
 
-    def cert_references(self) -> Dict[str, Set[str]]:
+    def cert_references(self) -> dict[str, set[str]]:
         """Map each referenced certificate full path to the roles it plays."""
         candidates = [
             ("cert", self.cert),
@@ -53,7 +54,7 @@ class SslProfile(BaseModel):
         for ckc in self.cert_key_chain:
             candidates += [("cert", ckc.cert), ("chain", ckc.chain)]
 
-        refs: Dict[str, Set[str]] = {}
+        refs: dict[str, set[str]] = {}
         for role, path in candidates:
             if path and path != "none":
                 refs.setdefault(path, set()).add(role)
@@ -61,4 +62,4 @@ class SslProfile(BaseModel):
 
 
 class SslProfiles(BaseModel):
-    items: List[SslProfile] = Field(default_factory=list)
+    items: list[SslProfile] = Field(default_factory=list)
