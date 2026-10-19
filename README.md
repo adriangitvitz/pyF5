@@ -1,304 +1,223 @@
 # PyF5
 
-A Python client library for interacting with F5 BIG-IP load balancers. This tool provides comprehensive functionality to retrieve, analyze, and export F5 virtual server and pool configurations with built-in rate limiting, circuit breaker patterns, and robust error handling.
+A read-only Python SDK for F5 BIG-IP that turns the iControl REST API into typed objects and ready-made analyses. Network and operations teams can use it to answer questions like these without clicking through the GUI or reading raw syslog: which certificates expire soon and which services do they break, what went down overnight and why, and are clients rejecting a new certificate?
+
+## Demo
+
+```python
+from datetime import datetime, timedelta, timezone
+
+from pyf5 import F5Client, outages, virtual_servers_by_pool
+
+with F5Client.from_keychain("prod-internal") as f5:
+    print(f5.get_devices().current.failover_state)
+
+    vs_by_pool = virtual_servers_by_pool(f5.get_virtual_servers(), f5.get_pools(), f5.get_rules())
+    end = datetime.now(timezone.utc)
+    entries = f5.get_logs("ltm", end - timedelta(days=1), end).entries
+
+for o in outages(entries, vs_by_pool):
+    print(o["pool"], o["member"], o["virtual_servers"], o["down_at"], o["up_at"], o["last_error"])
+```
+
+```text
+active
+/Common/app-a_pool  /Common/node-12:8443  ['app-a_vs']  11:00  11:59  Response Code: 200 (OK)
+/Common/api_pool_a  /Common/node-21:2525  ['api_vs']    10:59  12:00  Response Code: 301 (Moved Permanently)
+/Common/ldap_pool   /Common/node-31:6803  ['ldap_vs']   11:05  11:56  Unable to connect.
+```
+
+Log summary, grouped by message pattern:
+
+```text
+   18 err     tmm    No members available for pool <obj>                ['/Common/api_pool_a', '/Common/app-a_pool', ...]
+   20 notice  mcpd   Pool <obj> member <obj> monitor status down.        ['/Common/app-a_pool', '/Common/node-12:8443', ...]
+    9 notice  mcpd   SNMP_TRAP: Virtual <obj> has become unavailable     ['/Common/app-a_vs', '/Common/api_vs', ...]
+   14 notice  tmm    Clock advanced by <n> ticks                         []
+```
+
+TLS alerts per virtual server:
+
+```text
+portal_vs                                48=    0 46=    8 hs=     8
+web_vs                                   48=    0 46=    0 hs=   121
+log throttled 4 times: counts are minimums
+```
+
+## Why PyF5
+
+A BIG-IP already holds everything you need to explain an incident. The trouble is that it is spread across objects that only make sense together. A log line names a pool member, the member belongs to a pool, an iRule picks that pool, and a virtual server runs the iRule. A certificate is referenced by SSL profiles, and those profiles are attached to virtual servers.
+
+PyF5 connects those pieces for you:
+
+- **Typed, not raw.** Every response is validated into a pydantic model, so you work with `pool.members`, `cert.expires_at` and `entry.severity` instead of nested dicts.
+- **Relationships built in.** Certificate to profile to virtual server, pool to virtual server (through the default pool or any iRule that names it), and log line to virtual server.
+- **Analysis next to the data.** Log parsing, aggregation, outage pairing, TLS alert counting and certificate inventory are plain functions over the models, so they compose in a notebook, a script or another service.
+- **Read-only by design.** It only issues `GET` requests, so it is safe to point at production.
+- **Gentle on the device.** It has a token-bucket rate limit, a circuit breaker, retries with exponential backoff for network errors and 5xx, and token revocation on exit.
 
 ## Features
 
-- **F5 BIG-IP API Integration**: Full REST API client for F5 load balancers
-- **Rate Limiting**: Token bucket algorithm to prevent API overload
-- **Circuit Breaker**: Automatic failure detection and recovery
-- **Authentication Management**: Automatic token refresh and session handling
-- **Data Export**: JSON and CSV export capabilities
-- **Pool Analysis**: Detailed pool member health monitoring
-- **Virtual Server Mapping**: Complete virtual server to pool relationships
+### Configuration and state
 
-## Installation
+| Method | Returns |
+|---|---|
+| `get_virtual_servers()` / `get_virtual_server(name)` | Virtual servers with destination, default pool, iRules and profiles |
+| `get_virtual_servers_stats()` | Traffic statistics per virtual server |
+| `get_pools()` | Pools with their members and member state (`pool.members`) |
+| `get_nodes()` | Nodes with state and session |
+| `get_monitors(type)` / `get_all_monitors()` | HTTP, HTTPS and TCP monitors with `send`, `recv`, `interval` and `timeout`, indexed by full path |
+| `get_rules()` | iRules with their definitions |
+| `get_certificates()` | Certificates with subject, issuer, SAN and expiration |
+| `get_ssl_profiles(type)` | Client-SSL and server-SSL profiles and the certificates they use |
+| `get_devices()` | Cluster devices. `.current` shows whether you are talking to the active or the standby unit |
+| `get_logs(facility, start, end)` | Any log facility (`ltm`, `audit`, ...) for a time range, parsed into `LogEntry` objects via `.entries` |
 
-### Prerequisites
+### Analysis
 
-- Python 3.9 or higher
-- Access to F5 BIG-IP management interface
-- Valid F5 credentials with appropriate permissions
+| Function | What it answers |
+|---|---|
+| `pyf5.filter_entries(entries, min_severity, text)` | Only the lines at or above a severity, or containing some text |
+| `pyf5.aggregate(entries)` | Which message patterns repeat, how often, from when to when, and on which objects |
+| `pyf5.outages(entries, vs_by_pool)` | Which pool members went down, for how long, with what monitor error, and which virtual servers were affected |
+| `pyf5.tls_alerts(entries, virtual_servers)` | Which virtual servers have clients rejecting the certificate (alerts 46 and 48) or failing the handshake |
+| `pyf5.virtual_servers_by_pool(vs, pools, rules)` | Which virtual servers use each pool, through the default pool or an iRule |
+| `pyf5.certs.retrieve_inventory(f5)` / `filter_inventory(...)` / `flatten(...)` | Which certificates expire within N days and which profiles and virtual servers depend on them |
+| `pyf5.report.pool_health(f5)` / `summarize(data)` | Pool health per virtual server: members up and down, and health percentage |
 
-### Setup
+## Quick start
 
-1. Clone the repository:
+1. Install the SDK (requires Python 3.9+):
+
+   ```bash
+   uv add git+https://github.com/adriangitvitz/pyF5.git
+   # or: pip install git+https://github.com/adriangitvitz/pyF5.git
+   ```
+
+2. Provide credentials. Either export environment variables:
+
+   ```bash
+   export F5_HOST=<management-host> F5_USERNAME=<username> F5_PASSWORD=<password>
+   ```
+
+   or, on macOS, store one Keychain item per device. The service is `pyf5.<environment>`, the account is the username, and the comment is the management host. `-w` prompts for the password:
+
+   ```bash
+   security add-generic-password -s pyf5.prod-internal -a <username> -j <management-host> -w
+   ```
+
+3. Query the device:
+
+   ```python
+   from pyf5 import F5Client
+
+   with F5Client.from_env() as f5:  # or F5Client.from_keychain("prod-internal")
+       device = f5.get_devices().current
+       print(device.name, device.failover_state, device.version)
+       for vs in f5.get_virtual_servers().items:
+           print(vs.name, vs.destination, vs.pool)
+   ```
+
+## Usage and configuration
+
+### Creating a client
+
+```python
+from pyf5 import F5Client, RateLimitConfig
+
+f5 = F5Client(host=host, username=username, password=password)
+f5 = F5Client.from_env()
+f5 = F5Client.from_keychain("prod-internal")
+```
+
+All three accept the same options:
+
+```python
+F5Client.from_env(
+    rate_limit_config=RateLimitConfig(requests_per_second=5.0, burst_capacity=10),
+    timeout=30,      # seconds per request; raise it for long log ranges
+    max_retries=3,   # applies to network errors and 5xx; 4xx fail immediately
+)
+```
+
+Use the client as a context manager (`with ... as f5:`) or call `f5.close()` yourself. Either way the auth token is revoked on the device and the connection is closed.
+
+### Errors
+
+| Exception | When |
+|---|---|
+| `pyf5.AuthenticationError` | The device rejects the credentials or does not return a token |
+| `pyf5.CircuitOpenError` | Too many consecutive failures; requests pause for 60 seconds |
+| `httpx.HTTPStatusError` | The API answers 4xx, or 5xx after all retries |
+| `httpx.TransportError` | The device is unreachable after all retries |
+
+### Logs
+
+`get_logs` takes timezone-aware datetimes and converts them to UTC for the API:
+
+```python
+from datetime import datetime, timedelta, timezone
+
+from pyf5 import aggregate, filter_entries, tls_alerts
+
+end = datetime.now(timezone.utc)
+entries = f5.get_logs("ltm", end - timedelta(hours=1), end).entries
+
+for line in filter_entries(entries, text="pool"):
+    print(line.raw)
+
+for g in aggregate(filter_entries(entries, min_severity="warning")):
+    print(g["count"], g["severity"], g["pattern"], g["objects"][:3])
+
+result = tls_alerts(entries, f5.get_virtual_servers())
+```
+
+Severity levels go from `emerg` to `debug`. Pool member state changes are logged at `notice`, so use `min_severity="notice"` when you are looking for outages.
+
+### Monitors
+
+```python
+monitors = f5.get_all_monitors()
+for pool in f5.get_pools().items:
+    m = monitors.get(pool.monitor)
+    print(pool.name, m.recv if m else pool.monitor)
+```
+
+### Certificates and pool health
+
+```python
+from pyf5.certs import filter_inventory, retrieve_inventory
+from pyf5.report import pool_health, summarize
+
+expiring = filter_inventory(retrieve_inventory(f5), days=30, in_use=True)
+rows = summarize(pool_health(f5))
+```
+
+### Examples
+
+Ready-to-run scripts live in `examples/`. Each one takes `--env`, the name of a Keychain item:
+
+| Script | Output |
+|---|---|
+| `examples/certificate_inventory.py --env <env> --days 30 --in-use` | `certs/<env>_certificates.json` and `.csv`, plus a console report |
+| `examples/pool_health.py --env <env>` | `<env>_output.json` and `<env>_summary.csv` |
+| `examples/outages.py --env <env> --hours 24` | Outages with duration, monitor error and affected virtual servers |
+| `examples/log_summary.py --env <env> --hours 1` | Log patterns and TLS alerts per virtual server |
+
 ```bash
-git clone <repository-url>
-cd pyf5
+uv run python examples/outages.py --env prod-internal
 ```
 
-2. Create a virtual environment:
-```bash
-uv venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-```
+### Project layout
 
-3. Install dependencies:
-```bash
-uv sync
-```
-
-## Configuration
-
-### Rate Limiting
-
-The client includes configurable rate limiting to prevent overwhelming the F5 API:
-
-```python
-from client.ratelimit import RateLimitConfig
-
-rate_config = RateLimitConfig(
-    requests_per_second=5.0,  # Maximum requests per second
-    burst_capacity=10,        # Burst capacity for sudden spikes
-    cooldown_period=2.0       # Cooldown period in seconds
-)
-```
-
-### Client Configuration
-
-```python
-from client.base import F5Client
-
-f5_client = F5Client(
-    host="your-f5-host.example.com",
-    username="your-username",
-    password="your-password",
-    rate_limit_config=rate_config,
-    timeout=30,
-    max_retries=3
-)
-```
-
-## Usage
-
-### Basic Usage
-
-#### Complete Analysis Pipeline
-
-Run the main script to retrieve and process F5 data:
-
-```python
-# Run the script directly
-python parse.py
-```
-
-Or use the functions programmatically:
-
-```python
-from parse import retrieve_data, summary_csv
-from client.base import F5Client
-from client.ratelimit import RateLimitConfig
-
-# Configure rate limiting
-rate_config = RateLimitConfig(
-    requests_per_second=5.0,
-    burst_capacity=10,
-    cooldown_period=2.0
-)
-
-# Initialize client
-f5_client = F5Client(
-    host="<your-f5-host>",
-    username="<your-username>",
-    password="<your-password>",
-    rate_limit_config=rate_config,
-    timeout=30,
-    max_retries=3
-)
-
-# Retrieve and process data
-environment = "PRODUCTION"
-retrieve_data(f5_client, environment)
-
-# Generate summary CSV
-summary_csv(f"{environment}_output.json", f"{environment}_summary.csv")
-```
-
-#### Individual API Calls
-
-For direct API access:
-
-```python
-# Get virtual servers
-virtual_servers = f5_client.get_vs()
-
-# Get pools
-pools = f5_client.get_pools()
-
-# Get pool members
-pool_members = f5_client.get_pool_members("pool-name")
-```
-
-#### Manual Data Processing
-
-```python
-import json
-
-# Load and process virtual servers
-with open('vs.json', 'r') as f:
-    vs_data = json.load(f)
-
-# Load and process pools
-with open('pools.json', 'r') as f:
-    pools_data = json.load(f)
-```
-
-## Project Structure
-
-```
+```text
 pyf5/
-├── client/
-│   ├── __init__.py
-│   ├── base.py          # Main F5Client class
-│   ├── breaker.py       # Circuit breaker implementation
-│   ├── ratelimit.py     # Rate limiting functionality
-│   └── tokenmanager.py  # Authentication token management
-├── parse.py             # Main script and data processing functions
-├── pyproject.toml       # Project configuration
-└── README.md
-```
-
-### Core Components
-
-#### F5Client (`client/base.py`)
-The main client class that handles:
-- HTTP communication with F5 API
-- Authentication and token management
-- Rate limiting and circuit breaker integration
-- Retry logic with exponential backoff
-
-#### Rate Limiting (`client/ratelimit.py`)
-Token bucket implementation that:
-- Controls request rate to prevent API overload
-- Supports burst capacity for sudden spikes
-- Thread-safe implementation
-
-#### Circuit Breaker (`client/breaker.py`)
-Fault tolerance mechanism that:
-- Monitors API failures
-- Automatically opens circuit on repeated failures
-- Provides automatic recovery with half-open state
-
-#### Token Manager (`client/tokenmanager.py`)
-Authentication handling that:
-- Manages F5 authentication tokens
-- Automatic token refresh before expiration
-- Thread-safe token operations
-
-## Data Formats
-
-### Output JSON Structure
-
-The processed data includes comprehensive virtual server information:
-
-```json
-{
-  "name": "virtual-server-name",
-  "creationTime": "2023-01-01T00:00:00Z",
-  "destination": "10.0.1.100:80",
-  "disabled": false,
-  "source": "0.0.0.0/0",
-  "sourceAddressTranslation": "automap",
-  "pool": {
-    "name": "pool-name",
-    "monitor": "http",
-    "members": [
-      {
-        "name": "server1:80",
-        "address": "10.0.2.10:80",
-        "state": "up",
-        "session": "user-enabled",
-        "monitor": "up"
-      }
-    ]
-  }
-}
-```
-
-### CSV Summary Fields
-
-The CSV export includes the following columns:
-- `name`: Virtual server name
-- `destination`: Virtual server destination IP:port
-- `disabled`: Whether virtual server is disabled
-- `pool_name`: Associated pool name
-- `pool_monitor`: Pool health monitor
-- `total_members`: Total number of pool members
-- `up_members`: Number of healthy members
-- `down_members`: Number of unhealthy members
-- `health_percentage`: Pool health percentage
-- `member_addresses`: Semicolon-separated member addresses
-- `member_names`: Semicolon-separated member names
-
-## Error Handling
-
-The client implements comprehensive error handling:
-
-- **Rate Limiting**: Automatic throttling when rate limits are exceeded
-- **Circuit Breaker**: Automatic failure detection and recovery
-- **Retry Logic**: Exponential backoff for transient failures
-- **Authentication**: Automatic token refresh on expiration
-- **HTTP Errors**: Proper handling of 4xx and 5xx responses
-
-## Security Considerations
-
-- **Credentials**: Never hardcode credentials in production code
-- **HTTPS**: All communication uses HTTPS (certificate validation disabled for self-signed certs)
-- **Token Management**: Automatic token refresh prevents long-lived sessions
-- **Rate Limiting**: Prevents accidental API abuse
-
-## Environment Variables
-
-For production use, update the placeholders in `parse.py`:
-
-```python
-# Update these values in parse.py
-environment = "PRODUCTION"  # or "QA", "DEV", etc.
-f5_client = F5Client(
-    host="your-f5-host.example.com",  # Replace with actual F5 host
-    username="your-username",         # Replace with actual username
-    password="your-password",         # Replace with actual password
-    rate_limit_config=rate_config,
-    timeout=30,
-    max_retries=3
-)
-```
-
-Or consider using environment variables:
-
-```bash
-export F5_HOST="your-f5-host.example.com"
-export F5_USERNAME="your-username"
-export F5_PASSWORD="your-password"
-```
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Authentication Failures**
-   - Verify credentials are correct
-   - Check F5 user permissions
-   - Ensure management interface is accessible
-
-2. **Rate Limiting**
-   - Adjust `requests_per_second` in RateLimitConfig
-   - Increase `cooldown_period` for busy systems
-
-3. **Connection Timeouts**
-   - Increase `timeout` parameter
-   - Check network connectivity to F5 management interface
-
-4. **SSL/Certificate Issues**
-   - Client disables certificate verification by default
-   - For production, consider enabling certificate validation
-
-### Debug Logging
-
-Enable debug logging for troubleshooting:
-
-```python
-import logging
-logging.basicConfig(level=logging.DEBUG)
+  base.py          F5Client: auth, retries, rate limit, circuit breaker, API methods
+  logs.py          log filtering, aggregation, outages, TLS alerts
+  topology.py      pool to virtual server mapping (default pool and iRules)
+  certs.py         certificate inventory
+  report.py        pool health per virtual server
+  credentials.py   macOS Keychain lookup
+  schemas/         pydantic models for every response
+examples/          runnable scripts built on the SDK
 ```
