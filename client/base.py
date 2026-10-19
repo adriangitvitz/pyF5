@@ -1,11 +1,25 @@
+from __future__ import annotations
+
 import logging
-from typing import Optional, Dict, Any, List
-import httpx
 import time
-from .ratelimit import TokenBucket
+from datetime import datetime, timezone
+from typing import Optional
+
+import httpx
+
 from .breaker import CircuitBreaker
+from .ratelimit import RateLimitConfig, TokenBucket
+from .schemas.devices import Devices
+from .schemas.logs import LogsResponse
+from .schemas.monitors import Monitor, Monitors
+from .schemas.pools import Nodes, Pools
+from .schemas.rules import Rules
+from .schemas.ssl import Certificates, SslProfiles
+from .schemas.virtual_servers import VirtualServer, VirtualServers
+from .schemas.virtual_stats import VirtualServerStatsResponse
 from .tokenmanager import TokenManager
-from .ratelimit import RateLimitConfig
+
+MONITOR_TYPES = ("http", "https", "tcp")
 
 
 class F5Client:
@@ -43,6 +57,25 @@ class F5Client:
             ),
         )
 
+    def close(self) -> None:
+        token = self.token_manager.token
+        if token:
+            try:
+                self.client.delete(
+                    f"/mgmt/shared/authz/tokens/{token}",
+                    headers={"X-F5-Auth-Token": token},
+                )
+            except httpx.HTTPError as e:
+                logging.warning(f"Could not revoke token: {e}")
+            self.token_manager.token = None
+        self.client.close()
+
+    def __enter__(self) -> F5Client:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
     def _wait_for_rate_limit(self):
         while not self.rate_limiter.consume():
             time.sleep(0.1)
@@ -71,34 +104,27 @@ class F5Client:
 
         return self.circuit_breaker.call(_request_with_auth)
 
+    def _backoff(self, attempt: int, reason: object) -> None:
+        wait_time = self.backoff_factor * (2**attempt)
+        logging.warning(
+            f"Request failed (attempt {attempt + 1}): {reason} retrying in {wait_time}s"
+        )
+        time.sleep(wait_time)
+
     def make_request(self, method: str, endpoint: str, **kwargs):
-        last_exception = None
         for attempt in range(self.max_retries + 1):
             try:
                 response = self._make_authenticated_request(method, endpoint, **kwargs)
-                if 200 <= response.status_code < 300:
-                    return response
-                if 400 <= response.status_code < 500 and response.status_code != 401:
-                    response.raise_for_status()
-                if response.status_code >= 500 or response.status_code == 401:
-                    if attempt < self.max_retries:
-                        wait_time = self.backoff_factor * (2**attempt)
-                        time.sleep(wait_time)
-                        continue
-                    else:
-                        response.raise_for_status()
-            except Exception as e:
-                last_exception = e
-                logging.warning(f"Request exception (attempt {attempt + 1}): {e}")
-                if attempt < self.max_retries:
-                    wait_time = self.backoff_factor * (2**attempt)
-                    logging.warning(
-                        f"Request exception (attempt {attempt + 1}): {e}, retrying in {wait_time}s"
-                    )
-                    time.sleep(wait_time)
-                else:
-                    raise last_exception
-        raise last_exception or Exception("Max retries exceeded")
+            except httpx.TransportError as e:
+                if attempt == self.max_retries:
+                    raise
+                self._backoff(attempt, e)
+                continue
+            if response.status_code < 400:
+                return response
+            if response.status_code < 500 or attempt == self.max_retries:
+                response.raise_for_status()
+            self._backoff(attempt, f"HTTP {response.status_code}")
 
     def get_virtual_server_stats(self, name: str, partition: str = "Common"):
         response = self.make_request(
@@ -106,22 +132,65 @@ class F5Client:
         )
         return response.json()
 
-    def get_virtual_server(self, name: str, partition: str = "Common"):
+    def get_virtual_server(self, name: str, partition: str = "Common") -> VirtualServer:
         response = self.make_request("GET", f"/mgmt/tm/ltm/virtual/~{partition}~{name}")
-        return response.json()
+        return VirtualServer.model_validate(response.json())
 
-    def get_virtual_servers(self) -> Dict[str, Any]:
-        """Retrieve all load balancing pools"""
-        response = self.make_request("GET", "/mgmt/tm/ltm/virtual")
-        return response.json()
+    def get_virtual_servers(self) -> VirtualServers:
+        """Retrieve all virtual servers with their profiles"""
+        response = self.make_request(
+            "GET", "/mgmt/tm/ltm/virtual?expandSubcollections=true"
+        )
+        return VirtualServers.model_validate(response.json())
 
-    def get_pools(self) -> Dict[str, Any]:
-        """Retrieve all load balancing pools"""
-        response = self.make_request("GET", "/mgmt/tm/ltm/pool")
-        return response.json()
+    def get_virtual_servers_stats(self) -> VirtualServerStatsResponse:
+        response = self.make_request("GET", "/mgmt/tm/ltm/virtual/stats")
+        return VirtualServerStatsResponse.model_validate(response.json())
 
-    def get_pool_members(self, pool_name: str) -> List[Dict[str, Any]]:
-        """Get members of a specific pool"""
-        endpoint = f"/mgmt/tm/ltm/pool/~Common~{pool_name}/members"
-        response = self.make_request("GET", endpoint)
-        return response.json().get("items", [])
+    def get_pools(self) -> Pools:
+        """Retrieve all load balancing pools with their members"""
+        response = self.make_request("GET", "/mgmt/tm/ltm/pool?expandSubcollections=true")
+        return Pools.model_validate(response.json())
+
+    def get_nodes(self) -> Nodes:
+        response = self.make_request("GET", "/mgmt/tm/ltm/node")
+        return Nodes.model_validate(response.json())
+
+    def get_monitors(self, monitor_type: str) -> Monitors:
+        """Retrieve monitors of one type ('http', 'https', 'tcp', ...)"""
+        response = self.make_request("GET", f"/mgmt/tm/ltm/monitor/{monitor_type}")
+        return Monitors.model_validate(response.json())
+
+    def get_all_monitors(self) -> dict[str, Monitor]:
+        """Index http/https/tcp monitors by full path"""
+        return {m.full_path: m for t in MONITOR_TYPES for m in self.get_monitors(t).items}
+
+    def get_rules(self) -> Rules:
+        """Retrieve all iRules with their definitions"""
+        response = self.make_request("GET", "/mgmt/tm/ltm/rule")
+        return Rules.model_validate(response.json())
+
+    def get_devices(self) -> Devices:
+        """Retrieve cluster devices; Devices.current is the one being queried"""
+        response = self.make_request("GET", "/mgmt/tm/cm/device")
+        return Devices.model_validate(response.json())
+
+    def get_certificates(self) -> Certificates:
+        """Retrieve all SSL certificates with their expiration data"""
+        response = self.make_request("GET", "/mgmt/tm/sys/file/ssl-cert")
+        return Certificates.model_validate(response.json())
+
+    def get_ssl_profiles(self, profile_type: str) -> SslProfiles:
+        """Retrieve SSL profiles; profile_type is 'client-ssl' or 'server-ssl'"""
+        response = self.make_request("GET", f"/mgmt/tm/ltm/profile/{profile_type}")
+        return SslProfiles.model_validate(response.json())
+
+    def get_logs(self, facility: str, start: datetime, end: datetime) -> LogsResponse:
+        if start.tzinfo is None or end.tzinfo is None:
+            raise ValueError("start and end must be timezone-aware")
+        fmt = lambda d: d.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        response = self.make_request(
+            "GET",
+            f"/mgmt/tm/sys/log/{facility}/stats?options=range,{fmt(start)}--{fmt(end)}",
+        )
+        return LogsResponse.model_validate(response.json())

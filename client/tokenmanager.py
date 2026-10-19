@@ -1,7 +1,7 @@
-from threading import Lock
-import time
-from typing_extensions import Optional
 import logging
+import time
+from threading import Lock
+from typing import Optional
 
 
 class TokenManager:
